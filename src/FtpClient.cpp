@@ -3,6 +3,7 @@
 #include <iostream>
 #include <boost/thread/thread.hpp>
 #include <boost/array.hpp>
+#include <boost/make_shared.hpp>
 
 CsFtpClient::CsFtpClient
 (
@@ -15,7 +16,6 @@ boost::asio::io_service& io_service
 , m_socket(io_service)
 {
    logMsg("\n=-=-=-=-=-=-=-=-=-= \n", true);
-   m_buffer = new char[256];
    Start();
 }
 
@@ -52,17 +52,10 @@ tcp::resolver::iterator it
    if (!ec)
    {
       logMsg("0  Resolved.");
-      m_socket.async_connect
-         (
-         *it,
-         boost::bind
-         (
-         &CsFtpClient::ConnectedH,
-         this,
-         boost::asio::placeholders::error,
-         ++it
-         )
-         );
+      boost::asio::async_connect(m_socket, it, boost::bind(&CsFtpClient::ConnectedH,
+                                                           this,
+                                                           boost::asio::placeholders::error,
+                                                           boost::asio::placeholders::iterator));
    }
    else
    {
@@ -73,23 +66,13 @@ tcp::resolver::iterator it
 void CsFtpClient::ConnectedH
 (
 const boost::system::error_code& err,
-tcp::resolver::iterator endpoint_iterator
+tcp::resolver::iterator
 )
 {
    if (!err)
    {
-      boost::asio::async_write
-         (
-         m_socket,
-         m_request,
-         boost::bind
-         (
-         &CsFtpClient::CheckAliveH,
-         this,
-         boost::asio::placeholders::error
-         )
-         );
       logMsg("0  Connected.");
+      initiateReadResponse();
    }
    else
    {
@@ -97,187 +80,79 @@ tcp::resolver::iterator endpoint_iterator
    }
 }
 
-void CsFtpClient::CheckAliveH
-(
-const boost::system::error_code& err
-)
-{
-   if (!err)
-   {
-      logMsg("0  Waiting now for a response...");
-      // Read the response status line.
-      boost::asio::async_read_until
-         (
-         m_socket,
-         m_response,
-         "\r\n",
-         boost::bind
-         (
-         &CsFtpClient::Response1H,
-         this,
-         boost::asio::placeholders::error,
-         boost::asio::placeholders::bytes_transferred
-         )
-         );
-   }
-   else
-   {
-      logMsg("Error response_handler: " + err.message());
-   }
+namespace {
+    void removeTrailingLF(std::string& buffer)
+    {
+        if (buffer.size() > 0 && buffer.back() == '\r')
+            buffer.erase(std::prev(buffer.end()));
+    }
 }
 
-/// <summary>
-/// Handle response from the server.
-/// </summary>
-/// <param name="err"></param>
-void CsFtpClient::Response1H
-(
-const boost::system::error_code& err,
-std::size_t bytes_transferred
-)
-{
-   if (!err)
-   {
-      m_response.sgetn(m_buffer, std::streamsize(bytes_transferred));
-      m_response.sungetc();
-      //std::istream response_stream(&m_response);
-      std::string data(m_buffer, bytes_transferred);
-      //m_response.consume(bytes_transferred);
-      //m_response.commit(bytes_transferred);
-      std::ostream responseClearer(&m_response);
-      char zeroes[100] = { 0 };
-      std::string blanc("              ");
-      //responseClearer.write(zeroes, 100);
-      direct_insert(m_response, "          ");
-      m_strResponse = data;
-      //std::getline(response_stream, m_strResponse);
-      logMsg("?  Received " + std::to_string(bytes_transferred) + " bytes: \"" + trimmed(m_strResponse) + "\" (trimmed from \\r and \\n)");
+void CsFtpClient::initiateReadResponse() {
+    boost::asio::async_read_until(m_socket, m_response, "\r\n", [this](auto&& ec, auto&& bytes)
+    {
+        if (ec)
+        {
+            logMsg("read error: " + ec.message());
+        }
+        else
+        {
+            std::string buffer;
+            std::istream is(&m_response);
+            std::getline(is, buffer);
+            removeTrailingLF(buffer);
+            this->handleResponse(buffer);
+        }
 
-      // =================================================
-      // HERE COMES THE GREAT WEIRDNESS:
-      // 'Round' is just a wrapper for SendToFTPServer;
-      // but uncommenting alternatively 
-      // the first or the second line below, gives
-      // two different behaviours!
-       SendToFTPServer("USER " + m_username + "\r\n");
-        //Round("USER " + m_username + "\r\n");
-      // ==================================================
-   }
-   else
-   {
-      logMsg("Error read_handler: " + err.message());
-   }
+    });
 }
 
-
-void CsFtpClient::SendToFTPServer(std::string req)
+void CsFtpClient::handleResponse(std::string const& buffer)
 {
-   // ===================================================
-   // ANOTHER WEIRDNESS:
-   // Uncommenting either line gives -sometimes- 
-   // two behaviours!
-   // Like if the output contents impact the socket buffer...
-   logMsg("0  Sending this request  : " + trimmed(req));
-   // logMsg("0  Sending this request  : " + req);
-   // ===================================================
-   logMsg("\r\n"); logMsg("\r\n");
-   std::ostream request_stream(&m_request);
-   request_stream << req;
-   boost::asio::async_write
-      (
-      m_socket,
-      m_request,
-      boost::bind
-      (
-      &CsFtpClient::EatResponseH,
-      this,
-      boost::asio::placeholders::error
-      )
-      );
+    logMsg("handling response: " + buffer);
+
+    auto first_code = buffer.begin();
+    auto last_code = std::find(first_code, buffer.end(), ' ');
+    if (last_code == buffer.end())
+    {
+        logMsg("no code in response");
+        return;
+    }
+
+    auto first_message = std::next(last_code);
+    auto last_message = buffer.end();
+
+    auto code = std::string(first_code, last_code);
+    if (code == "220")
+    {
+        sendRequest(std::make_shared<std::string>("USER " + this->m_username + '\n'));
+    }
+    else if(code == "331")
+    {
+        sendRequest(std::make_shared<std::string>("PASS " + this->m_passwd + '\n'));
+    }
+    else if(code == "230")
+    {
+        logMsg("logged in - what next?");
+    }
+    else
+    {
+        logMsg("unrecognised response code");
+    }
 }
 
-
-/// <summary>
-/// Check if server is awake.
-/// </summary>
-/// <param name="err"></param>
-void CsFtpClient::EatResponseH
-(
-const boost::system::error_code& err
-)
+void CsFtpClient::sendRequest(std::shared_ptr<std::string> preq)
 {
-   if (!err)
-   {
-      logMsg("0  Eating now a response...");
-      // Read the response status line.
-      boost::asio::async_read_until
-         (
-         m_socket,
-         m_response,
-         "\r\n",
-         boost::bind
-         (
-         &CsFtpClient::Response2H,
-         this,
-         boost::asio::placeholders::error,
-         boost::asio::placeholders::bytes_transferred
-         )
-         );
-   }
-   else
-   {
-      logMsg("Error : " + err.message());
-   }
+    boost::asio::async_write(m_socket, boost::asio::buffer(*preq), [this, preq](auto&& ec, auto&& size)
+    {
+        if (ec != boost::system::error_code())
+        {
+            logMsg("send error:" + ec.message());
+        } else {
+            initiateReadResponse();
+        }
+
+    });
 }
 
-/// <summary>
-/// Handle response from the server.
-/// </summary>
-/// <param name="err"></param>
-void CsFtpClient::Response2H
-(
-const boost::system::error_code& err,
-std::size_t bytes_transferred
-)
-{
-   if (!err)
-   {
-      std::istream response_stream(&m_response);
-      m_strResponse = "";
-      std::getline(response_stream, m_strResponse);
-      logMsg("?  receive2d " + std::to_string(bytes_transferred) + " bytes: \"" + trimmed(m_strResponse) + "\" (trimmed from \\r and \\n)");
-      m_received = true;
-   }
-   else
-   {
-      logMsg("Error : " + err.message());
-   }
-}
-
-/// <summary>
-/// A back-and-forth with the server.
-/// Blocks until received a response.
-/// </summary>
-/// <param name="request"></param>
-/// <param name="expectedCode"></param>
-/// <returns>true if received success code.</returns>
-bool CsFtpClient::Round(std::string const & request, std::string expectedCode)
-{
-   m_received = false;
-   try{
-      SendToFTPServer(request);
-   }
-   catch (...)
-   {
-      std::cerr << "exc";
-   }
-   //logfile << &m_response; // WEIRD
-   logfile.flush();          // WEIRD
-   while (!m_received)
-   {
-      logMsg("1  Waiting....");
-      boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
-   }
-   return true;
-}
 
