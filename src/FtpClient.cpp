@@ -172,14 +172,8 @@ std::size_t bytes_transferred
 
 void CsFtpClient::SendToFTPServer(std::string req)
 {
-   // ===================================================
-   // ANOTHER WEIRDNESS:
-   // Uncommenting either line gives -sometimes- 
-   // two behaviours!
-   // Like if the output contents impact the socket buffer...
    logMsg("0  Sending this request  : " + trimmed(req));
-   // logMsg("0  Sending this request  : " + req);
-   // ===================================================
+
    logMsg("\r\n"); logMsg("\r\n");
    std::ostream request_stream(&m_request);
    request_stream << req;

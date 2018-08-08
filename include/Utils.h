@@ -12,14 +12,15 @@
 std::ofstream logfile("log.txt", std::ios::app);
 //std::ostream & logfile = std::cout;
 
-std::string & trimmed(std::string & s)
+std::string trimmed(std::string const s)
 {
+   std::string res(s);
    int i{};
    std::string trim = "\r\n";
 
-   while ((i = s.find_first_of(trim)) != -1)
-      s.erase(i, 1);
-   return s;
+   while ((i = res.find_first_of(trim)) != -1)
+      res.erase(i, 1);
+   return res;
 }
 
 std::string daytime_string()
